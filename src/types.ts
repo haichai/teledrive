@@ -97,7 +97,20 @@ export interface AppSettings {
   askWhereToSave: boolean;
 }
 
-export type NavView = 'all' | 'saved' | 'recent' | 'starred' | 'document' | FileCategory;
+export type NavView = 'all' | 'saved' | 'recent' | 'starred' | 'document' | 'links' | FileCategory;
+
+export interface TelegramLink {
+  id: string;
+  url: string;
+  messageText: string;
+  telegramMessageId: number;
+  telegramChatId: string;
+  createdAt: number;
+  previewUrl?: string;
+  title?: string;
+  description?: string;
+  siteName?: string;
+}
 
 
 export type SortField = 'name' | 'date' | 'size';

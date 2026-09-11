@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { TelegramUser, Language, FilterState } from '../types';
 
-export const TELEGRAM_LOGO_URL = 'https://thumb.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/960px-Telegram_logo.svg.png?utm_source=vi.wikipedia.org&utm_campaign=index&utm_content=thumbnail';
+export const TELEGRAM_LOGO_URL = 'https://i.ibb.co/Q3XgxBmK/logo-telecloud.webp';
 
 interface HeaderProps {
   user: TelegramUser | null;
@@ -72,7 +72,7 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <div className="w-8 h-8 relative flex items-center justify-center shrink-0">
             <img
-              src="/telegram_logo.png"
+              src="https://i.ibb.co/Q3XgxBmK/logo-telecloud.webp"
               onError={e => {
                 (e.target as HTMLImageElement).src = TELEGRAM_LOGO_URL;
               }}
@@ -81,10 +81,10 @@ export const Header: React.FC<HeaderProps> = ({
             />
           </div>
 
-          <span className="font-bold text-base sm:text-lg text-slate-800 dark:text-white tracking-tight flex items-center gap-1.5">
-            <span>TeleDrive</span>
+          <span className="hidden sm:flex font-bold text-base sm:text-lg text-slate-800 dark:text-white tracking-tight items-center gap-1.5">
+            <span>TeleCloud</span>
             <span className="hidden lg:inline-block text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-950 text-sky-700 dark:text-sky-300">
-              Cloud
+              Drive
             </span>
           </span>
         </div>
@@ -134,63 +134,13 @@ export const Header: React.FC<HeaderProps> = ({
           {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-600" />}
         </button>
 
-        {/* Language select dropdown */}
-        <div className="relative">
-          <button
-            id="language-toggle-button"
-            onClick={() => setShowLangDropdown(!showLangDropdown)}
-            className="flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors border border-transparent hover:border-slate-200 dark:hover:border-slate-700"
-          >
-            <span className="hidden sm:inline">{lang === 'vi' ? '🇻🇳 Tiếng Việt' : '🇬🇧 English'}</span>
-            <span className="sm:hidden">{lang === 'vi' ? '🇻🇳' : '🇬🇧'}</span>
-            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-          </button>
-
-          {showLangDropdown && (
-            <div className="absolute right-0 top-full mt-1 w-36 rounded-xl shadow-lg border p-1 z-50 bg-white border-slate-200 dark:bg-slate-800 dark:border-slate-700">
-              <button
-                onClick={() => {
-                  onToggleLang('vi');
-                  setShowLangDropdown(false);
-                }}
-                className={`w-full text-left px-3 py-1.5 rounded-lg text-xs flex items-center justify-between ${
-                  lang === 'vi' ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-600 dark:text-sky-400 font-semibold' : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
-                }`}
-              >
-                <span>🇻🇳 Tiếng Việt</span>
-                {lang === 'vi' && <Check className="w-3.5 h-3.5 text-sky-500" />}
-              </button>
-              <button
-                onClick={() => {
-                  onToggleLang('en');
-                  setShowLangDropdown(false);
-                }}
-                className={`w-full text-left px-3 py-1.5 rounded-lg text-xs flex items-center justify-between ${
-                  lang === 'en' ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-600 dark:text-sky-400 font-semibold' : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
-                }`}
-              >
-                <span>🇬🇧 English</span>
-                {lang === 'en' && <Check className="w-3.5 h-3.5 text-sky-500" />}
-              </button>
-            </div>
-          )}
-        </div>
-
         {/* Help icon (desktop only) */}
         <button
           onClick={() => setShowHelpModal(true)}
-          className="hidden md:inline-flex p-2 rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+          className="p-2 rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
           title="Trợ giúp"
         >
           <HelpCircle className="w-4 h-4 text-slate-500" />
-        </button>
-
-        {/* Notification bell (desktop only) */}
-        <button
-          className="hidden md:inline-flex p-2 rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors relative"
-          title="Thông báo"
-        >
-          <Bell className="w-4 h-4 text-slate-500" />
         </button>
 
         {/* User Account / Avatar */}
@@ -290,15 +240,18 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 dark:border-slate-700">
             <h3 className="font-bold text-base text-slate-900 dark:text-white mb-2">
-              TeleDrive - Telegram Cloud Storage
+              TeleCloud - Telegram Cloud Storage
             </h3>
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mb-4">
-              TeleDrive biến tài khoản Telegram của bạn thành ổ đĩa đám mây không giới hạn dung lượng lưu trữ hoàn toàn miễn phí. Tất cả tệp tin được lưu trực tiếp vào mục <strong>Saved Messages</strong> hoặc kênh riêng tư của bạn.
+              TeleCloud biến tài khoản Telegram của bạn thành ổ đĩa đám mây không giới hạn dung lượng lưu trữ hoàn toàn miễn phí. Tất cả tệp tin được lưu trực tiếp vào mục <strong>Saved Messages</strong> hoặc kênh riêng tư của bạn.
             </p>
             <div className="space-y-1.5 text-xs text-slate-500 dark:text-slate-400 mb-5">
               <div>✓ Dung lượng: Không giới hạn</div>
               <div>✓ Giới hạn kích thước mỗi file: 2 GB</div>
               <div>✓ Bảo mật: Trực tiếp qua Telegram MTProto</div>
+              <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-700/60 font-medium text-slate-600 dark:text-slate-300">
+                Cần thêm trợ giúp? Liên hệ qua Facebook: <a href="https://www.facebook.com/Greenlight.2001/" target="_blank" rel="noopener noreferrer" className="text-sky-500 hover:underline">@Quang vu</a>
+              </div>
             </div>
             <button
               onClick={() => setShowHelpModal(false)}

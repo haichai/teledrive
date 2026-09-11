@@ -22,6 +22,7 @@ import {
   UploadTask,
   ViewMode,
   AppSettings,
+  TelegramLink,
 } from './types';
 import {
   loadFiles,
@@ -41,11 +42,14 @@ import {
   triggerFileDownload,
   fetchTelegramDialogs,
   fetchTelegramFiles,
+  fetchTelegramFilesAndLinks,
   deleteTelegramMessage,
   deleteTelegramMessages,
   verifyTelegramMessages,
   renameTelegramMessage,
   forwardTelegramMessage,
+  syncMetadataToTelegram,
+  fetchMetadataFromTelegram,
 } from './services/telegram';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -135,6 +139,7 @@ export default function App() {
   // Primary States
   const [user, setUser] = useState<TelegramUser | null>(() => loadUser());
   const [files, setFiles] = useState<DriveFile[]>(() => loadFiles());
+  const [links, setLinks] = useState<TelegramLink[]>([]);
   const [folders, setFolders] = useState<DriveFolder[]>(() => loadFolders());
   const [pinnedDestinationIds, setPinnedDestinationIds] = useState<string[]>(() => loadPinnedDestinationIds());
   const [destinations, setDestinations] = useState<StorageDestinationInfo[]>(() => {
@@ -148,6 +153,8 @@ export default function App() {
   });
   const [currentDestinationId, setCurrentDestinationId] = useState<string>(() => destinations[0]?.id || 'dest-saved');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<number>(0);
 
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<NavView>('saved');
@@ -264,8 +271,9 @@ export default function App() {
     }
 
     try {
-      // 1. Fetch real files from Telegram MTProto
-      const cloudFiles = await fetchTelegramFiles(session, targetChatId, 1000);
+      // 1. Fetch real files and links from Telegram MTProto
+      const { files: cloudFiles, links: cloudLinks } = await fetchTelegramFilesAndLinks(session, targetChatId, 1000);
+      setLinks(cloudLinks);
       const cloudMsgIds = new Set(
         cloudFiles
           .map(f => f.telegramMessageId)
@@ -433,6 +441,22 @@ export default function App() {
         }
       } catch (e) {
         console.warn('Failed to refresh dialogs during sync:', e);
+      }
+
+      // 5. Sync folder structure from Telegram Saved Messages
+      try {
+        const cloudMeta = await fetchMetadataFromTelegram(session);
+        if (cloudMeta && cloudMeta.folders && cloudMeta.folders.length > 0) {
+          // If local folders are empty OR it's a manual sync (not silent)
+          if (folders.length === 0 || !silent) {
+            setFolders(cloudMeta.folders);
+            if (!silent) {
+              showToast('Đã tải và đồng bộ cấu trúc thư mục từ Telegram!');
+            }
+          }
+        }
+      } catch (fErr) {
+        console.warn('Failed to sync folders from Telegram during sync:', fErr);
       }
     } catch (err: any) {
       console.error('File sync failed:', err);
@@ -665,8 +689,10 @@ export default function App() {
     }
 
     if (newFolders.length > 0) {
-      setFolders(prev => [...newFolders, ...prev]);
+      const nextFolders = [...newFolders, ...folders];
+      setFolders(nextFolders);
       showToast(`Đã tự động tạo ${newFolders.length} thư mục theo cấu trúc tệp`);
+      syncFoldersWithCloud(nextFolders);
     }
 
     // 2. Upload files in sequence with live progress and cancel support
@@ -755,6 +781,17 @@ export default function App() {
     }
   };
 
+  // Helper to sync folder metadata to Telegram Saved Messages
+  const syncFoldersWithCloud = async (foldersToSync: DriveFolder[]) => {
+    if (user?.sessionString) {
+      try {
+        await syncMetadataToTelegram(user.sessionString, foldersToSync);
+      } catch (e) {
+        console.warn('Failed to sync folders to Telegram Cloud:', e);
+      }
+    }
+  };
+
   // Create new folder
   const handleCreateFolder = (name: string, color: string) => {
     const newFolder: DriveFolder = {
@@ -767,14 +804,54 @@ export default function App() {
       isStarred: false,
       isDeleted: false,
     };
-    setFolders(prev => [newFolder, ...prev]);
+    const nextFolders = [newFolder, ...folders];
+    setFolders(nextFolders);
     showToast(`Đã tạo thư mục "${name}"`);
+    syncFoldersWithCloud(nextFolders);
   };
 
   // File item actions
-  const handleDownloadFile = (file: DriveFile) => {
+  const handleDownloadFile = async (file: DriveFile) => {
+    if (user?.sessionString && file.telegramMessageId) {
+      try {
+        setDownloadingFileId(file.id);
+        setDownloadProgress(0);
+        showToast(`Đang tải trực tiếp siêu tốc từ Telegram: ${file.name}...`);
+
+        const { downloadFileDirectlyFromTelegram } = await import('./services/clientTelegram');
+        
+        const blob = await downloadFileDirectlyFromTelegram(
+          user.sessionString,
+          file.telegramChatId || 'me',
+          file.telegramMessageId,
+          file.name,
+          (pct) => {
+            setDownloadProgress(pct);
+          }
+        );
+
+        // Trigger local download using Blob URL
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+        showToast(`✓ Đã tải xong trực tiếp: ${file.name}`);
+        return;
+      } catch (err: any) {
+        console.warn('Direct MTProto download failed, falling back to proxy:', err);
+      } finally {
+        setDownloadingFileId(null);
+      }
+    }
+
+    // Proxy-based fallback
     triggerFileDownload(file);
-    showToast(`Đang tải về: ${file.name}`);
+    showToast(`Đang tải về (qua Proxy): ${file.name}`);
   };
 
   const handleToggleStarFile = (file: DriveFile) => {
@@ -784,9 +861,9 @@ export default function App() {
   };
 
   const handleToggleStarFolder = (folder: DriveFolder) => {
-    setFolders(prev =>
-      prev.map(f => (f.id === folder.id ? { ...f, isStarred: !f.isStarred } : f))
-    );
+    const nextFolders = folders.map(f => (f.id === folder.id ? { ...f, isStarred: !f.isStarred } : f));
+    setFolders(nextFolders);
+    syncFoldersWithCloud(nextFolders);
   };
 
   const handleDeleteFile = async (file: DriveFile) => {
@@ -872,11 +949,10 @@ export default function App() {
     );
 
     // Delete subfolders as well or move them up
-    setFolders(prev =>
-      prev
-        .filter(f => f.id !== folderId)
-        .map(f => (f.parentId === folderId ? { ...f, parentId } : f))
-    );
+    const nextFolders = folders
+      .filter(f => f.id !== folderId)
+      .map(f => (f.parentId === folderId ? { ...f, parentId } : f));
+    setFolders(nextFolders);
 
     // If currently inside this folder, navigate back to parent or root
     if (currentFolderId === folderId) {
@@ -884,13 +960,14 @@ export default function App() {
     }
 
     showToast(`Đã xoá thư mục "${folderName}"`);
+    syncFoldersWithCloud(nextFolders);
   };
 
   const handleRenameFolder = (folderId: string, newName: string) => {
-    setFolders(prev =>
-      prev.map(f => (f.id === folderId ? { ...f, name: newName, updatedAt: Date.now() } : f))
-    );
+    const nextFolders = folders.map(f => (f.id === folderId ? { ...f, name: newName, updatedAt: Date.now() } : f));
+    setFolders(nextFolders);
     showToast(`Đã đổi tên thư mục thành "${newName}"`);
+    syncFoldersWithCloud(nextFolders);
   };
 
   const handleCancelTask = (taskId: string) => {
@@ -1036,8 +1113,7 @@ export default function App() {
           onOpenFolderUpload={handleOpenFolderUpload}
           onOpenCreateFolder={() => setShowCreateFolderModal(true)}
           onOpenSettings={() => setShowSettingsModal(true)}
-          onSyncUpload={() => handleSyncFiles(undefined, false)}
-          onSyncRestore={() => handleSyncFiles(undefined, false)}
+          onSyncCloud={() => handleSyncFiles(undefined, false)}
           usedStorageFormatted={usedStorageFormatted}
           filesCount={files.length}
           isSyncing={isSyncing}
@@ -1049,6 +1125,7 @@ export default function App() {
         <FileManager
           files={files}
           folders={folders}
+          telegramLinks={links}
           currentFolderId={currentFolderId}
           currentView={currentView}
           activeDestination={destinations.find(d => d.id === currentDestinationId) || destinations[0]}
@@ -1258,6 +1335,29 @@ export default function App() {
           settings={settings}
           onUpdateSettings={partial => setSettings(prev => ({ ...prev, ...partial }))}
         />
+      )}
+
+      {/* Floating Download Progress Panel */}
+      {downloadingFileId && (
+        <div className="fixed bottom-6 right-6 z-50 p-4 rounded-2xl bg-white text-slate-800 shadow-2xl border border-slate-200/80 backdrop-blur-md w-72 flex flex-col gap-2.5 animate-in fade-in slide-in-from-bottom-4 duration-200">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-900 truncate max-w-[180px]">
+              {files.find(f => f.id === downloadingFileId)?.name || 'Đang tải tệp...'}
+            </span>
+            <span className="text-2xs font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full">
+              {downloadProgress}%
+            </span>
+          </div>
+          <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+            <div 
+              className="bg-sky-500 h-full rounded-full transition-all duration-150 ease-out" 
+              style={{ width: `${downloadProgress}%` }}
+            />
+          </div>
+          <span className="text-2xs text-slate-500">
+            Đang tải trực tiếp Telegram DC (Bảo mật & Siêu tốc)
+          </span>
+        </div>
       )}
 
       {/* Toast Notification Alert */}

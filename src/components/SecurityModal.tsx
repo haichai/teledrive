@@ -101,7 +101,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({ onClose, lang }) =
                 <span>Không có Backend Server</span>
               </div>
               <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
-                TeleDrive hoạt động hoàn toàn tĩnh (Static Single Page App). Không có máy chủ Node/Python trung gian nào đứng giữa bạn và Telegram để có thể bị hack hay đánh cắp dữ liệu.
+                TeleCloud hoạt động hoàn toàn tĩnh (Static Single Page App). Không có máy chủ Node/Python trung gian nào đứng giữa bạn và Telegram để có thể bị hack hay đánh cắp dữ liệu.
               </p>
             </div>
 

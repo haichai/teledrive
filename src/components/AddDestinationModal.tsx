@@ -54,7 +54,7 @@ export const AddDestinationModal: React.FC<AddDestinationModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div className="p-3 rounded-xl bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900/50 text-xs text-sky-700 dark:text-sky-300">
-            Bạn có thể tạo một <strong>Channel</strong> hoặc <strong>Group</strong> riêng tư trên Telegram và thêm TeleDrive Bot hoặc tài khoản của bạn vào đó làm ổ cứng lưu trữ.
+            Bạn có thể tạo một <strong>Channel</strong> hoặc <strong>Group</strong> riêng tư trên Telegram và thêm TeleCloud Bot hoặc tài khoản của bạn vào đó làm ổ cứng lưu trữ.
           </div>
 
           <div>

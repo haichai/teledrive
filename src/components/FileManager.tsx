@@ -36,6 +36,7 @@ import {
   Filter,
   ShieldCheck,
   Eye,
+  Link,
 } from 'lucide-react';
 import {
   DriveFile,
@@ -48,8 +49,114 @@ import {
   SortField,
   SortOrder,
   ViewMode,
+  TelegramLink,
 } from '../types';
 import { formatFileSize, formatDate } from '../services/storage';
+import { resolveApiUrl } from '../services/telegram';
+
+class TaskQueue {
+  private queue: (() => Promise<void>)[] = [];
+  private activeCount = 0;
+  private limit = 2; // Allow at most 2 simultaneous downloads for GramJS stability
+
+  add(task: () => Promise<void>) {
+    this.queue.push(task);
+    this.runNext();
+  }
+
+  private runNext() {
+    if (this.activeCount >= this.limit || this.queue.length === 0) {
+      return;
+    }
+
+    const task = this.queue.shift();
+    if (!task) return;
+
+    this.activeCount++;
+    task().finally(() => {
+      this.activeCount--;
+      this.runNext();
+    });
+  }
+}
+
+const directDownloadQueue = new TaskQueue();
+
+const ClientDirectImage: React.FC<{ src: string; alt: string; className?: string }> = ({ src, alt, className }) => {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let localUrl: string | null = null;
+
+    const loadDirectImg = () => {
+      directDownloadQueue.add(async () => {
+        if (!active) return;
+        try {
+          const match = src.match(/^client-direct:\/\/([^/]+)\/([^/]+)\/(.+)$/);
+          if (!match) return;
+          const chatId = match[1];
+          const messageId = parseInt(match[2], 10);
+          const fileName = decodeURIComponent(match[3]);
+
+          const { loadUser } = await import('../services/storage');
+          const userObj = loadUser();
+          if (!userObj?.sessionString) return;
+
+          setLoading(true);
+          const { downloadFileDirectlyFromTelegram } = await import('../services/clientTelegram');
+          const blob = await downloadFileDirectlyFromTelegram(
+            userObj.sessionString,
+            chatId,
+            messageId,
+            fileName,
+            undefined,
+            true
+          );
+
+          if (active) {
+            localUrl = URL.createObjectURL(blob);
+            setBlobUrl(localUrl);
+          }
+        } catch (err) {
+          console.error('Failed to load client direct thumbnail:', err);
+        } finally {
+          if (active) {
+            setLoading(false);
+          }
+        }
+      });
+    };
+
+    loadDirectImg();
+
+    return () => {
+      active = false;
+      if (localUrl) {
+        URL.revokeObjectURL(localUrl);
+      }
+    };
+  }, [src]);
+
+  if (loading) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-slate-50 dark:bg-slate-900/40">
+        <div className="w-4 h-4 border-2 border-sky-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!blobUrl) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-slate-50 dark:bg-slate-900/40 text-slate-400">
+        <ImageIcon className="w-4 h-4" />
+      </div>
+    );
+  }
+
+  return <img src={blobUrl} alt={alt} className={className} loading="lazy" referrerPolicy="no-referrer" />;
+};
 
 export function getFileExt(fileName: string): string {
   const parts = fileName.split('.');
@@ -87,6 +194,7 @@ export function matchesFileTypeFilter(file: DriveFile, filterType: FileTypeFilte
 interface FileManagerProps {
   files: DriveFile[];
   folders: DriveFolder[];
+  telegramLinks?: TelegramLink[];
   currentFolderId: string | null;
   currentView: NavView;
   activeDestination?: StorageDestinationInfo;
@@ -122,6 +230,7 @@ interface FileManagerProps {
 export const FileManager: React.FC<FileManagerProps> = ({
   files,
   folders,
+  telegramLinks = [],
   currentFolderId,
   currentView,
   activeDestination,
@@ -187,6 +296,10 @@ export const FileManager: React.FC<FileManagerProps> = ({
   // Move modal state
   const [movingFile, setMovingFile] = useState<DriveFile | null>(null);
 
+  // Copy link feedback state
+  const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
+  const [copiedTgId, setCopiedTgId] = useState<string | null>(null);
+
   // Close context menu on outside click
   useEffect(() => {
     const handleOutside = () => {
@@ -228,12 +341,13 @@ export const FileManager: React.FC<FileManagerProps> = ({
   // Compute files in current scope to determine counts for file type filter chips
   const currentScopeFiles = files.filter(file => {
     if (file.isDeleted) return false;
+    if (!isFileInDestination(file, activeDestination)) return false;
     if (currentFolderId) return file.folderId === currentFolderId;
     if (currentView === 'saved') {
-      return isFileInDestination(file, activeDestination);
+      return true;
     }
     if (currentView === 'starred') return file.isStarred;
-    if (currentView === 'recent') return true;
+    if (currentView === 'recent' || currentView === 'links') return true;
     if (currentView === 'document') return file.category === 'document' || Boolean(file.name.match(/\.(docx|pdf|txt|xlsx|pptx)$/i));
     return true;
   });
@@ -251,6 +365,9 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
   // Filter files
   const filteredFiles = files.filter(file => {
+    // Always restrict to active destination first
+    if (!isFileInDestination(file, activeDestination)) return false;
+
     // Search
     if (filters.search) {
       const q = filters.search.toLowerCase();
@@ -266,8 +383,10 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
     // View filter
     if (currentView === 'saved') {
-      if (!isFileInDestination(file, activeDestination)) return false;
+      // already filtered by isFileInDestination above
     } else if (currentView === 'recent') {
+      if (file.isDeleted) return false;
+    } else if (currentView === 'links') {
       if (file.isDeleted) return false;
     } else if (currentView === 'starred') {
       if (!file.isStarred || file.isDeleted) return false;
@@ -305,7 +424,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
   // Folders to display: visible in 'saved' and 'all', or when navigating inside folders
   const displayedFolders = folders.filter(f => {
     if (currentView === 'starred') return f.isStarred && !f.isDeleted;
-    if (currentView === 'recent' || currentView === 'document') return false;
+    if (currentView === 'recent' || currentView === 'document' || currentView === 'links') return false;
     return f.parentId === currentFolderId && !f.isDeleted;
   });
 
@@ -326,6 +445,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
         return 'Có gắn dấu sao';
       case 'document':
         return 'Tài liệu';
+      case 'links':
+        return 'Quản lý liên kết';
       default:
         return 'Trang chủ';
     }
@@ -398,10 +519,14 @@ export const FileManager: React.FC<FileManagerProps> = ({
       );
     }
     if (file.category === 'image' || ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
-      const imgUrl = file.thumbnailUrl || file.previewUrl;
+      const rawImgUrl = file.thumbnailUrl || file.previewUrl;
+      const isClientDirect = rawImgUrl?.startsWith('client-direct://');
+      const imgUrl = (rawImgUrl && !isClientDirect) ? resolveApiUrl(rawImgUrl) : '';
       return (
         <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-500 dark:bg-amber-950/40 dark:text-amber-400 flex items-center justify-center shrink-0 overflow-hidden">
-          {imgUrl ? (
+          {isClientDirect && rawImgUrl ? (
+            <ClientDirectImage src={rawImgUrl} alt="" className="w-full h-full object-cover" />
+          ) : imgUrl ? (
             <img src={imgUrl} alt="" className="w-full h-full object-cover" />
           ) : (
             <ImageIcon className="w-4 h-4" />
@@ -461,21 +586,31 @@ export const FileManager: React.FC<FileManagerProps> = ({
   // Helper for large preview card thumbnail (LARGE & MEDIUM ICONS)
   const renderLargePreview = (file: DriveFile, isLarge: boolean) => {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    const imgUrl = file.thumbnailUrl || file.previewUrl;
+    const rawImgUrl = file.thumbnailUrl || file.previewUrl;
+    const isClientDirect = rawImgUrl?.startsWith('client-direct://');
+    const imgUrl = (rawImgUrl && !isClientDirect) ? resolveApiUrl(rawImgUrl) : '';
     const isImg = file.category === 'image' || ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext);
     const isVid = file.category === 'video' || ['mp4', 'mkv', 'mov', 'webm'].includes(ext);
 
     const heightClass = isLarge ? 'h-48' : 'h-32';
 
-    if ((isImg || isVid) && imgUrl) {
+    if ((isImg || isVid) && (imgUrl || (isClientDirect && rawImgUrl))) {
       return (
         <div className={`w-full ${heightClass} relative overflow-hidden bg-slate-100 dark:bg-slate-900 rounded-t-xl group/thumb`}>
-          <img
-            src={imgUrl}
-            alt={file.name}
-            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-            loading="lazy"
-          />
+          {isClientDirect && rawImgUrl ? (
+            <ClientDirectImage
+              src={rawImgUrl}
+              alt={file.name}
+              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            />
+          ) : (
+            <img
+              src={imgUrl}
+              alt={file.name}
+              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+              loading="lazy"
+            />
+          )}
           {isVid && (
             <div className="absolute inset-0 bg-black/25 flex items-center justify-center">
               <div className="w-10 h-10 rounded-full bg-white/90 dark:bg-slate-900/90 text-slate-900 dark:text-white flex items-center justify-center shadow-lg">
@@ -1007,8 +1142,167 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto bg-white dark:bg-[#0b1120]">
-        {/* Empty State */}
-        {sortedFiles.length === 0 && displayedFolders.length === 0 ? (
+        {currentView === 'links' ? (
+          <div className="p-4 sm:p-6 space-y-4 max-w-5xl mx-auto">
+            <div className="bg-sky-50 dark:bg-sky-950/40 border border-sky-100 dark:border-sky-900/60 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                  Quản lý liên kết TeleCloud
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Trích xuất và quản lý tất cả các liên kết URL xuất hiện trong tin nhắn, bài viết của kênh Telegram.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300 font-semibold bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-sky-100 dark:border-sky-800 shrink-0">
+                <span>Tổng số liên kết:</span>
+                <span className="font-bold">{telegramLinks.length}</span>
+              </div>
+            </div>
+
+            {telegramLinks.length === 0 ? (
+              <div className="py-20 text-center flex flex-col items-center justify-center border border-dashed border-slate-200 dark:border-slate-800 rounded-3xl bg-slate-50/50 dark:bg-slate-900/10">
+                <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mb-3">
+                  <Link className="w-6 h-6" />
+                </div>
+                <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">Không tìm thấy liên kết nào</h4>
+                <p className="text-xs text-slate-400 mt-1 max-w-xs">Hãy quét (đồng bộ) kênh để tự động phát hiện và trích xuất tất cả các đường dẫn URL chia sẻ.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4">
+                {telegramLinks.map(link => {
+                  const telegramDirectLink = `https://t.me/c/${link.telegramChatId.replace('-100', '')}/${link.telegramMessageId}`;
+                  const isCopiedLink = copiedShareId === link.id;
+
+                  return (
+                    <div key={`link-card-${link.id}`} className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 p-4 sm:p-5 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:border-sky-300 dark:hover:border-sky-800 transition-all shadow-2xs">
+                      <div className="flex flex-col sm:flex-row items-start gap-4 min-w-0 flex-1 w-full">
+                        {/* Thumbnail or Icon */}
+                        {link.previewUrl ? (
+                          <div className="w-full sm:w-28 h-28 sm:h-20 rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 border border-slate-200/60 dark:border-slate-800 shrink-0 relative shadow-2xs">
+                            <img
+                              src={resolveApiUrl(link.previewUrl)}
+                              alt={link.title || 'Link preview'}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              loading="lazy"
+                              onError={(e) => {
+                                // If image fails to load, fallback gracefully to a placeholder
+                                (e.currentTarget as HTMLImageElement).style.display = 'none';
+                              }}
+                            />
+                          </div>
+                        ) : (
+                          <div className="w-10 h-10 bg-slate-50 dark:bg-slate-800 text-sky-500 rounded-xl flex items-center justify-center shrink-0 border border-slate-150/50 dark:border-slate-750">
+                            <Link className="w-5 h-5" />
+                          </div>
+                        )}
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                            {link.siteName && (
+                              <span className="text-[10px] bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 px-2 py-0.5 rounded-md font-bold uppercase tracking-wider font-mono">
+                                {link.siteName}
+                              </span>
+                            )}
+                            <span className="text-[10px] bg-slate-100 dark:bg-slate-850 text-slate-500 px-1.5 py-0.5 rounded-md font-semibold">
+                              Tin nhắn #{link.telegramMessageId}
+                            </span>
+                          </div>
+
+                          {link.title ? (
+                            <div className="space-y-1">
+                              <h4 className="font-bold text-sm sm:text-base text-slate-800 dark:text-slate-100 leading-tight">
+                                {link.title}
+                              </h4>
+                              <a
+                                href={link.url}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="text-xs text-sky-600 dark:text-sky-400 hover:underline truncate max-w-md sm:max-w-xl block font-mono"
+                                title={link.url}
+                              >
+                                {link.url}
+                              </a>
+                            </div>
+                          ) : (
+                            <a
+                              href={link.url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="font-bold text-xs sm:text-sm text-sky-600 dark:text-sky-400 hover:underline truncate max-w-md sm:max-w-xl block leading-normal"
+                              title={link.url}
+                            >
+                              {link.url}
+                            </a>
+                          )}
+
+                          {link.description && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 line-clamp-2 leading-relaxed">
+                              {link.description}
+                            </p>
+                          )}
+
+                          {/* Context / Caption snippet where link was found */}
+                          {link.messageText && (
+                            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400 italic bg-slate-50/50 dark:bg-slate-950/20 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800/60 leading-relaxed whitespace-pre-wrap">
+                              "{link.messageText}"
+                            </div>
+                          )}
+
+                          <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-x-2.5 gap-y-1 mt-2">
+                            <span>{formatDate(link.createdAt)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right Action buttons */}
+                      <div className="flex sm:flex-row md:flex-col items-center gap-2 w-full md:w-auto shrink-0 border-t md:border-t-0 pt-3 md:pt-0 border-slate-100 dark:border-slate-800/60">
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(link.url);
+                            setCopiedShareId(link.id);
+                            setTimeout(() => setCopiedShareId(null), 2000);
+                          }}
+                          className="flex-1 md:w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors"
+                        >
+                          {isCopiedLink ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-500" />
+                              <span className="text-emerald-500 font-semibold">Đã sao chép</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>Sao chép</span>
+                            </>
+                          )}
+                        </button>
+                        <a
+                          href={link.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="flex-1 md:w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-sky-50 hover:bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:hover:bg-sky-900/40 dark:text-sky-300 rounded-xl text-xs font-semibold transition-colors"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Mở liên kết</span>
+                        </a>
+                        <a
+                          href={telegramDirectLink}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="flex-1 md:w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-50 hover:bg-slate-100 text-slate-600 dark:bg-slate-900 dark:hover:bg-slate-850 dark:text-slate-400 rounded-xl text-xs font-semibold border border-slate-200/60 dark:border-slate-800/80 transition-colors"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Xem tin nhắn gốc</span>
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : sortedFiles.length === 0 && displayedFolders.length === 0 ? (
           <div className="py-20 text-center flex flex-col items-center justify-center p-8">
             <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mb-3">
               <File className="w-8 h-8" />
@@ -1934,7 +2228,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
               Xác nhận xóa {selectedFileIds.size} tệp đã chọn
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 leading-relaxed">
-              Các tệp này sẽ được xóa vĩnh viễn khỏi Telegram Cloud và danh sách TeleDrive của bạn. Thao tác này không thể hoàn tác.
+              Các tệp này sẽ được xóa vĩnh viễn khỏi Telegram Cloud và danh sách TeleCloud của bạn. Thao tác này không thể hoàn tác.
             </p>
 
             {/* List of files being deleted preview */}

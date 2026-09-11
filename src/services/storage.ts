@@ -239,7 +239,7 @@ export function loadTheme(): 'dark' | 'light' {
   if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
     return 'dark';
   }
-  return 'dark'; // TeleDrive looks very sleek and modern in deep Telegram dark mode
+  return 'dark'; // TeleCloud looks very sleek and modern in deep Telegram dark mode
 }
 
 export function saveTheme(theme: 'dark' | 'light') {

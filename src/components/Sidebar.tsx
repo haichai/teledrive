@@ -22,6 +22,7 @@ import {
   Eye,
   ShieldCheck,
   Sparkles,
+  Link,
 } from 'lucide-react';
 import { NavView, Language, StorageDestinationInfo } from '../types';
 
@@ -37,8 +38,7 @@ interface SidebarProps {
   onOpenFolderUpload: () => void;
   onOpenCreateFolder: () => void;
   onOpenSettings: () => void;
-  onSyncUpload: () => void;
-  onSyncRestore: () => void;
+  onSyncCloud: () => void;
   usedStorageFormatted: string;
   filesCount: number;
   lastSyncTime?: string;
@@ -60,8 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenFolderUpload,
   onOpenCreateFolder,
   onOpenSettings,
-  onSyncUpload,
-  onSyncRestore,
+  onSyncCloud,
   usedStorageFormatted,
   filesCount,
   lastSyncTime = '9/10/2026, 12:21:07 PM',
@@ -423,6 +422,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <FileText className="w-4 h-4 text-slate-500" />
             <span>Tài liệu</span>
           </button>
+
+          <button
+            onClick={() => handleSelectNav('links')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors ${
+              currentView === 'links'
+                ? 'bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 font-semibold'
+                : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60'
+            }`}
+          >
+            <Link className="w-4 h-4 text-slate-500" />
+            <span>Quản lý liên kết</span>
+          </button>
         </div>
 
         {/* Cloud Sync Section */}
@@ -433,26 +444,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           <button
             onClick={() => {
-              onSyncUpload();
+              onSyncCloud();
               if (onCloseMobile) onCloseMobile();
             }}
             disabled={isSyncing}
             className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
           >
-            <CloudUpload className="w-4 h-4 text-sky-500" />
-            <span>Đồng bộ lên cloud</span>
-          </button>
-
-          <button
-            onClick={() => {
-              onSyncRestore();
-              if (onCloseMobile) onCloseMobile();
-            }}
-            disabled={isSyncing}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
-          >
-            <CloudDownload className="w-4 h-4 text-sky-500" />
-            <span>Khôi phục từ cloud</span>
+            <RefreshCw className={`w-4 h-4 text-sky-500 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>Sync cloud</span>
           </button>
 
           <div className="px-3 py-1 text-[10px] text-slate-400">
@@ -521,7 +520,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Slide-out Drawer */}
           <div className="relative w-72 max-w-[85vw] h-full bg-white dark:bg-[#0f172a] border-r border-slate-200 dark:border-slate-800 flex flex-col justify-between shadow-2xl z-10 animate-in slide-in-from-left duration-200">
             <div className="h-14 px-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
-              <span className="font-bold text-sm text-slate-800 dark:text-white">Menu TeleDrive</span>
+              <span className="font-bold text-sm text-slate-800 dark:text-white">Menu TeleCloud</span>
               <button
                 onClick={onCloseMobile}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"

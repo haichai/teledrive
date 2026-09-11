@@ -2,7 +2,7 @@ import { Language } from '../types';
 
 export const translations = {
   vi: {
-    appTitle: 'TeleDrive',
+    appTitle: 'TeleCloud',
     tagline: 'Biến Telegram thành Google Drive không giới hạn',
     storageUnlimited: 'Dung lượng không giới hạn',
     storageSubtext: 'Được hỗ trợ bởi hạ tầng Telegram MTProto',
@@ -98,12 +98,12 @@ export const translations = {
     directTelegramLink: 'Link gốc tin nhắn Telegram',
     
     // Security info
-    securityTitle: 'Tại sao TeleDrive an toàn 100%?',
+    securityTitle: 'Tại sao TeleCloud an toàn 100%?',
     securityDirectConnection: 'Trình duyệt kết nối trực tiếp đến MTProto của Telegram, không có bất kỳ server trung gian nào thu thập dữ liệu của bạn.',
     securityIndexedDb: 'Dữ liệu chỉ lưu cục bộ trên IndexedDB của trình duyệt máy bạn.',
   },
   en: {
-    appTitle: 'TeleDrive',
+    appTitle: 'TeleCloud',
     tagline: 'Turn Telegram into Unlimited Google Drive',
     storageUnlimited: 'Unlimited Cloud Storage',
     storageSubtext: 'Powered by Telegram MTProto infrastructure',
@@ -199,7 +199,7 @@ export const translations = {
     directTelegramLink: 'Direct Telegram Message URL',
     
     // Security info
-    securityTitle: 'Why is TeleDrive 100% Secure?',
+    securityTitle: 'Why is TeleCloud 100% Secure?',
     securityDirectConnection: 'Your browser communicates directly to Telegram MTProto servers with zero middleman.',
     securityIndexedDb: 'All directory indices and session tokens reside strictly in your local browser IndexedDB.',
   }

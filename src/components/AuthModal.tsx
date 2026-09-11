@@ -332,8 +332,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     if (!botToken.trim()) return;
     const botUser: TelegramUser = {
       id: 'bot-' + Date.now().toString().slice(-6),
-      firstName: 'TeleDrive Storage Bot',
-      username: 'teledrive_cloud_bot',
+      firstName: 'TeleCloud Storage Bot',
+      username: 'telecloud_cloud_bot',
       avatarUrl: 'https://images.unsplash.com/photo-1614680376593-902f749f7ffc?auto=format&fit=crop&w=200&q=80',
       isPremium: false,
       dcId: 5,

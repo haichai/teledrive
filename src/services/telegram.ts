@@ -1,7 +1,116 @@
-import QRCode from 'qrcode';
-import { DriveFile, StorageTarget, TelegramUser } from '../types';
+import QRCode from 'qrcode/lib/browser';
+import { DriveFile, DriveFolder, StorageTarget, TelegramUser, TelegramLink } from '../types';
 import { determineCategory } from './storage';
 import { encryptFileBuffer } from './crypto';
+import {
+  initClientTelegramQr,
+  pollClientTelegramQr,
+  submitClient2faPassword,
+  cancelClientTelegramQr,
+  sendClientPhoneCode,
+  verifyClientPhoneCode,
+  fetchTelegramDialogsDirect,
+  fetchTelegramFilesAndLinksDirect,
+  deleteTelegramMessagesDirect,
+  renameTelegramMessageDirect,
+  forwardTelegramMessageDirect,
+  syncMetadataToTelegramDirect,
+  fetchMetadataFromTelegramDirect,
+  verifyTelegramMessagesDirect
+} from './clientTelegram';
+
+// Backend API URL Configuration for standalone and distributed deployments (e.g., Vercel frontend + Render backend)
+export function getBackendApiUrl(): string {
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('teledrive_backend_api_url');
+    if (saved && saved.trim()) {
+      return saved.trim().replace(/\/+$/, '');
+    }
+  }
+  const envUrl = (import.meta as any).env?.VITE_API_BASE_URL;
+  if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
+    return envUrl.trim().replace(/\/+$/, '');
+  }
+  return '';
+}
+
+export function setBackendApiUrl(url: string): void {
+  if (typeof window !== 'undefined') {
+    if (!url || !url.trim()) {
+      localStorage.removeItem('teledrive_backend_api_url');
+    } else {
+      localStorage.setItem('teledrive_backend_api_url', url.trim().replace(/\/+$/, ''));
+    }
+  }
+}
+
+export function resolveApiUrl(path: string): string {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:') || path.startsWith('data:')) {
+    return path;
+  }
+  const base = getBackendApiUrl();
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return base ? `${base}${normalizedPath}` : normalizedPath;
+}
+
+// Centralized safe fetch helper that prevents HTML parsing crashes (e.g. Vercel 404 "The page could not be found")
+export async function safeFetchJson<T = any>(endpoint: string, options?: RequestInit): Promise<T> {
+  const fullUrl = resolveApiUrl(endpoint);
+  let res: Response;
+  try {
+    res = await fetch(fullUrl, options);
+  } catch (netErr: any) {
+    const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
+    if (isVercel && !getBackendApiUrl()) {
+      throw new Error(
+        'Không thể kết nối đến máy chủ Backend. Vui lòng thử lại bằng cách sử dụng kết nối trực tiếp.'
+      );
+    }
+    throw new Error(netErr?.message || 'Lỗi mạng khi kết nối đến máy chủ Telegram MTProto.');
+  }
+
+  const rawText = await res.text().catch(() => '');
+  let data: any = null;
+
+  if (rawText && rawText.trim()) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      // Non-JSON response, typically Vercel 404 HTML "The page could not be found"
+      const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
+      const isHtml =
+        rawText.includes('<html') ||
+        rawText.includes('<!DOCTYPE') ||
+        rawText.includes('The page c') ||
+        rawText.startsWith('The page') ||
+        res.status === 404;
+
+      if (isVercel || isHtml) {
+        throw new Error(
+          'Không tìm thấy dịch vụ MTProto Backend (' +
+            endpoint +
+            '). Sử dụng kết nối trực tiếp client-side thay thế.'
+        );
+      }
+      throw new Error(`Máy chủ trả về phản hồi không hợp lệ (HTTP ${res.status}). Vui lòng thử lại.`);
+    }
+  }
+
+  if (data?.isVercelServerless || data?.isVercel) {
+    throw new Error(
+      data.error ||
+        'Vercel Serverless không hỗ trợ tiến trình socket MTProto chạy liên tục. Sử dụng kết nối trực tiếp client-side thay thế.'
+    );
+  }
+
+  if (!res.ok) {
+    const errMsg = data?.error || data?.message || `Lỗi máy chủ (${res.status})`;
+    throw new Error(errMsg);
+  }
+
+  return data as T;
+}
 
 // Real Telegram MTProto QR Initialization
 export async function initRealTelegramQr(apiId?: number, apiHash?: string): Promise<{
@@ -12,29 +121,38 @@ export async function initRealTelegramQr(apiId?: number, apiHash?: string): Prom
   expires: number;
   expiresInSeconds: number;
 }> {
-  const res = await fetch('/api/telegram/qr/init', {
+  if (!getBackendApiUrl()) {
+    return initClientTelegramQr(apiId, apiHash);
+  }
+
+  const data = await safeFetchJson<any>('/api/telegram/qr/init', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiId, apiHash }),
   });
-  const data = await res.json();
-  if (!data.success) {
-    const rawError = data.error || '';
+
+  if (!data || !data.success) {
+    const rawError = data?.error || '';
     if (rawError === 'TIMEOUT' || rawError.includes('TIMEOUT')) {
       throw new Error('Kết nối tới máy chủ Telegram bị trễ. Đang tự động kết nối lại...');
     }
     throw new Error(rawError || 'Khởi tạo MTProto QR thất bại');
   }
 
-  const qrDataUrl = await QRCode.toDataURL(data.qrUrl, {
+  if (!data.qrUrl) {
+    throw new Error('Máy chủ Backend không phản hồi URL mã QR Telegram.');
+  }
+
+  const svgString = await QRCode.toString(data.qrUrl, {
+    type: 'svg',
     width: 280,
     margin: 2,
     color: {
       dark: '#0f172a',
       light: '#ffffff',
     },
-    errorCorrectionLevel: 'M',
   });
+  const qrDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
 
   return {
     sessionId: data.sessionId,
@@ -64,23 +182,27 @@ export async function pollRealTelegramQr(sessionId: string): Promise<{
   sessionString?: string;
   error?: string;
 }> {
-  const res = await fetch(`/api/telegram/qr/status?sessionId=${encodeURIComponent(sessionId)}`);
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Kiểm tra trạng thái quét thất bại');
+  if (!getBackendApiUrl() || sessionId.startsWith('client-qr-')) {
+    return pollClientTelegramQr(sessionId);
+  }
+
+  const data = await safeFetchJson<any>(`/api/telegram/qr/status?sessionId=${encodeURIComponent(sessionId)}`);
+  if (!data || !data.success) {
+    throw new Error(data?.error || 'Kiểm tra trạng thái quét thất bại');
   }
 
   let qrDataUrl: string | undefined;
   if (data.qrUrl) {
-    qrDataUrl = await QRCode.toDataURL(data.qrUrl, {
+    const svgString = await QRCode.toString(data.qrUrl, {
+      type: 'svg',
       width: 280,
       margin: 2,
       color: {
         dark: '#0f172a',
         light: '#ffffff',
       },
-      errorCorrectionLevel: 'M',
     });
+    qrDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(svgString)}`;
   }
 
   return {
@@ -98,22 +220,29 @@ export async function pollRealTelegramQr(sessionId: string): Promise<{
 
 // Submit 2FA Cloud Password
 export async function submit2faPassword(sessionId: string, password: string) {
-  const res = await fetch('/api/telegram/qr/2fa', {
+  if (!getBackendApiUrl() || sessionId.startsWith('client-qr-')) {
+    return submitClient2faPassword(sessionId, password);
+  }
+
+  const data = await safeFetchJson<any>('/api/telegram/qr/2fa', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, password }),
   });
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Mật khẩu 2FA không chính xác');
+  if (!data || !data.success) {
+    throw new Error(data?.error || 'Mật khẩu 2FA không chính xác');
   }
   return data;
 }
 
 // Cancel QR session
 export async function cancelRealTelegramQr(sessionId: string) {
+  if (!getBackendApiUrl() || sessionId.startsWith('client-qr-')) {
+    return cancelClientTelegramQr(sessionId);
+  }
+
   try {
-    await fetch('/api/telegram/qr/cancel', {
+    await safeFetchJson('/api/telegram/qr/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId }),
@@ -127,14 +256,17 @@ export async function sendPhoneCode(phoneNumber: string, apiId?: number, apiHash
   isCodeViaApp: boolean;
   message: string;
 }> {
-  const res = await fetch('/api/telegram/phone/send-code', {
+  if (!getBackendApiUrl()) {
+    return sendClientPhoneCode(phoneNumber, apiId, apiHash);
+  }
+
+  const data = await safeFetchJson<any>('/api/telegram/phone/send-code', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phoneNumber, apiId, apiHash }),
   });
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Gửi mã xác nhận thất bại');
+  if (!data || !data.success) {
+    throw new Error(data?.error || 'Gửi mã xác nhận thất bại');
   }
   return data;
 }
@@ -153,24 +285,30 @@ export async function verifyPhoneCode(sessionId: string, code: string, password?
   sessionString?: string;
   error?: string;
 }> {
-  const res = await fetch('/api/telegram/phone/verify-code', {
+  if (!getBackendApiUrl() || sessionId.startsWith('client-phone-')) {
+    return verifyClientPhoneCode(sessionId, code, password);
+  }
+
+  const data = await safeFetchJson<any>('/api/telegram/phone/verify-code', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, code, password }),
   });
-  const data = await res.json();
-  if (!res.ok && !data.needs2fa) {
-    throw new Error(data.error || 'Xác nhận mã thất bại');
+  if (!data || (!data.success && !data.needs2fa)) {
+    throw new Error(data?.error || 'Xác nhận mã thất bại');
   }
   return data;
 }
 
 // Fetch real dialogs/channels from Telegram account
 export async function fetchTelegramDialogs(sessionString: string) {
-  const res = await fetch(`/api/telegram/dialogs?session=${encodeURIComponent(sessionString)}`);
-  const data = await res.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Không thể tải danh sách kênh');
+  if (!getBackendApiUrl()) {
+    return fetchTelegramDialogsDirect(sessionString);
+  }
+
+  const data = await safeFetchJson<any>(`/api/telegram/dialogs?session=${encodeURIComponent(sessionString)}`);
+  if (!data || !data.success) {
+    throw new Error(data?.error || 'Không thể tải danh sách kênh');
   }
   return data.dialogs as Array<{
     id: string;
@@ -184,41 +322,37 @@ export async function fetchTelegramDialogs(sessionString: string) {
   }>;
 }
 
+// Fetch real files and links from Telegram MTProto
+export async function fetchTelegramFilesAndLinks(
+  sessionString: string,
+  chatId: string = 'me',
+  limit: number = 1000
+): Promise<{ files: DriveFile[]; links: TelegramLink[] }> {
+  if (!getBackendApiUrl()) {
+    return fetchTelegramFilesAndLinksDirect(sessionString, chatId, limit);
+  }
+
+  const data = await safeFetchJson<any>(
+    `/api/telegram/files?session=${encodeURIComponent(sessionString)}&chatId=${encodeURIComponent(chatId)}&limit=${limit}`
+  );
+
+  if (!data || !data.success) {
+    throw new Error(data?.error || 'Không thể đồng bộ tệp từ Telegram Cloud');
+  }
+  return {
+    files: (data.files || []) as DriveFile[],
+    links: (data.links || []) as TelegramLink[],
+  };
+}
+
 // Fetch real files/media from Telegram MTProto
 export async function fetchTelegramFiles(
   sessionString: string,
   chatId: string = 'me',
   limit: number = 1000
 ): Promise<DriveFile[]> {
-  const res = await fetch(
-    `/api/telegram/files?session=${encodeURIComponent(sessionString)}&chatId=${encodeURIComponent(chatId)}&limit=${limit}`
-  );
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let errMsg = `Không thể đồng bộ tệp từ Telegram (Lỗi máy chủ: ${res.status})`;
-    try {
-      const json = JSON.parse(text);
-      if (json?.error) errMsg = json.error;
-    } catch {
-      if (res.status === 504 || res.status === 502) {
-        errMsg = 'Kết nối Telegram bị nghẽn hoặc quá hạn chờ. Vui lòng thử đồng bộ lại sau vài giây.';
-      }
-    }
-    throw new Error(errMsg);
-  }
-
-  let data: any;
-  try {
-    data = await res.json();
-  } catch (parseErr) {
-    throw new Error('Phản hồi từ Telegram không hợp lệ. Vui lòng thử đồng bộ lại.');
-  }
-
-  if (!data.success) {
-    throw new Error(data.error || 'Không thể đồng bộ tệp từ Telegram Cloud');
-  }
-  return data.files as DriveFile[];
+  const res = await fetchTelegramFilesAndLinks(sessionString, chatId, limit);
+  return res.files;
 }
 
 // Upload file to Telegram (with MTProto chunking if session exists, otherwise smooth local simulation)
@@ -245,8 +379,70 @@ export async function uploadFileToTelegram(
     fileToUpload = encryptedBlob;
   }
 
-  // If real Telegram sessionString is provided, use reliable chunked upload directly to Telegram MTProto
+  // If real Telegram sessionString is provided, try Direct Browser-to-Telegram MTProto Upload first
   if (sessionString) {
+    try {
+      if (onProgress) {
+        onProgress(2, 'Đang kết nối...', '...', 'Đang mở cổng kết nối trực tiếp đến Telegram DC (WebSocket)...');
+      }
+      const { uploadFileDirectlyToTelegram } = await import('./clientTelegram');
+
+      // We wrap the blob/file in a File object if it is an encrypted Blob
+      const fileObjectToUpload = (fileToUpload instanceof File) 
+        ? fileToUpload 
+        : new File([fileToUpload], file.name, { type: file.type || 'application/octet-stream' });
+
+      const result = await uploadFileDirectlyToTelegram({
+        file: fileObjectToUpload,
+        sessionString,
+        chatId: targetType === 'saved' ? 'me' : (targetChatId || targetName),
+        caption: `TeleCloud Cloud: ${file.name}`,
+        onProgress: (pct, speed, eta) => {
+          if (onProgress) {
+            onProgress(pct, speed, eta, `Tốc độ tối đa trực tiếp: ${pct}%`);
+          }
+        },
+        signal: abortSignal,
+      });
+
+      if (!result) {
+        throw new Error('Không nhận được phản hồi từ Telegram MTProto');
+      }
+
+      const cleanFileName = file.name.replace(/[\\/:*?"<>|]/g, '_');
+      const doc = result.media?.document || {};
+      const actualSize = doc.size || fileToUpload.size;
+      const downloadUrl = `client-direct://${targetType === 'saved' ? 'me' : (targetChatId || targetName)}/${result.id}/${encodeURIComponent(cleanFileName)}`;
+
+      const driveFile: DriveFile = {
+        id: `file-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        name: file.name,
+        size: actualSize,
+        category: determineCategory(file.name, file.type || 'application/octet-stream'),
+        mimeType: file.type || 'application/octet-stream',
+        folderId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        telegramMessageId: result.id,
+        telegramChatId: targetType === 'saved' ? 'me' : (targetChatId || targetName),
+        storageTarget: targetType,
+        storageName: targetName,
+        isEncrypted,
+        downloadUrl,
+      };
+
+      return driveFile;
+    } catch (directErr: any) {
+      if (directErr.message?.includes('USER_CANCELED') || abortSignal?.aborted) {
+        throw new Error('Quá trình tải tệp đã bị dừng');
+      }
+      console.warn('[Upload] Direct browser MTProto upload failed, falling back to server-side chunked upload:', directErr);
+      if (!getBackendApiUrl()) {
+        throw new Error(`Tải tệp trực tiếp qua WebSocket thất bại: ${directErr.message || directErr}`);
+      }
+    }
+
+    // Server-side chunked upload fallback
     const uploadId = `up-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB per chunk - optimal for web proxies & Cloud Run
     const totalChunks = Math.max(1, Math.ceil(fileToUpload.size / CHUNK_SIZE));
@@ -287,7 +483,7 @@ export async function uploadFileToTelegram(
         formData.append('fileSize', String(fileToUpload.size));
         formData.append('sessionString', sessionString);
         formData.append('chatId', effectiveChatId);
-        formData.append('caption', `TeleDrive Cloud: ${file.name}`);
+        formData.append('caption', `TeleCloud Cloud: ${file.name}`);
         formData.append('chunk', chunkBlob, `${file.name}.part${chunkIndex}`);
 
         // Upload chunk via XMLHttpRequest to capture real progress
@@ -347,7 +543,7 @@ export async function uploadFileToTelegram(
             reject(new Error('Quá trình tải tệp đã bị dừng'));
           };
 
-          xhr.open('POST', '/api/telegram/upload-chunk');
+          xhr.open('POST', resolveApiUrl('/api/telegram/upload-chunk'));
           xhr.send(formData);
         });
 
@@ -361,7 +557,7 @@ export async function uploadFileToTelegram(
           let unknownCount = 0;
           while (!isDone) {
             if (abortSignal?.aborted) {
-              fetch('/api/telegram/upload-cancel', {
+              safeFetchJson('/api/telegram/upload-cancel', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ uploadId }),
@@ -372,10 +568,7 @@ export async function uploadFileToTelegram(
             await new Promise(r => setTimeout(r, 750));
 
             try {
-              const statusRes = await fetch(`/api/telegram/upload-status?uploadId=${encodeURIComponent(uploadId)}`);
-              if (!statusRes.ok) continue;
-
-              const statusData = await statusRes.json();
+              const statusData = await safeFetchJson<any>(`/api/telegram/upload-status?uploadId=${encodeURIComponent(uploadId)}`);
               if (statusData.status === 'completed') {
                 finalData = statusData.result
                   ? { success: true, ...statusData.result }
@@ -409,7 +602,6 @@ export async function uploadFileToTelegram(
             } catch (pollErr: any) {
               if (pollErr.message?.includes('hủy') || pollErr.message?.includes('bị dừng')) throw pollErr;
               if (pollErr.message?.includes('Lỗi khi gửi tệp lên Telegram') || pollErr.message?.includes('Không tìm thấy')) throw pollErr;
-              // Transient poll error, continue polling
             }
           }
         }
@@ -453,7 +645,7 @@ export async function uploadFileToTelegram(
         throw new Error('Quá trình tải tệp đã bị dừng');
       }
       console.error('[Upload] Real MTProto chunked upload error:', err);
-      throw err; // Propagate real error so user and UI know exactly what happened
+      throw err;
     }
   }
 
@@ -464,8 +656,14 @@ export async function uploadFileToTelegram(
 // Download file trigger
 export function triggerFileDownload(file: DriveFile) {
   if (file.downloadUrl) {
+    if (file.downloadUrl.startsWith('client-direct://')) {
+      // Direct connection helper
+      console.warn('[DirectDownload] Please use Direct WebSocket Download built in UI.');
+      return;
+    }
+    const fullDownloadUrl = resolveApiUrl(file.downloadUrl);
     const a = document.createElement('a');
-    a.href = file.downloadUrl;
+    a.href = fullDownloadUrl;
     a.download = file.name;
     document.body.appendChild(a);
     a.click();
@@ -485,7 +683,7 @@ export function triggerFileDownload(file: DriveFile) {
     return;
   }
 
-  const sampleContent = `TeleDrive Telegram Cloud File: ${file.name}\nMessage ID: ${file.telegramMessageId}\nSize: ${file.size} bytes\nDirect MTProto Transport.`;
+  const sampleContent = `TeleCloud Telegram Cloud File: ${file.name}\nMessage ID: ${file.telegramMessageId}\nSize: ${file.size} bytes\nDirect MTProto Transport.`;
   const blob = new Blob([sampleContent], { type: file.mimeType || 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -503,14 +701,17 @@ export async function deleteTelegramMessage(
   chatId: string,
   messageId: number
 ): Promise<boolean> {
+  if (!getBackendApiUrl()) {
+    return deleteTelegramMessagesDirect(sessionString, chatId, [messageId]);
+  }
+
   try {
-    const res = await fetch('/api/telegram/delete', {
+    const data = await safeFetchJson<any>('/api/telegram/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionString, chatId, messageId }),
     });
-    const data = await res.json();
-    return !!data.success;
+    return !!data?.success;
   } catch (err) {
     console.error('deleteTelegramMessage failed:', err);
     return false;
@@ -524,14 +725,17 @@ export async function deleteTelegramMessages(
   messageIds: number[]
 ): Promise<boolean> {
   if (!messageIds || messageIds.length === 0) return true;
+  if (!getBackendApiUrl()) {
+    return deleteTelegramMessagesDirect(sessionString, chatId, messageIds);
+  }
+
   try {
-    const res = await fetch('/api/telegram/delete', {
+    const data = await safeFetchJson<any>('/api/telegram/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionString, chatId, messageIds }),
     });
-    const data = await res.json();
-    return !!data.success;
+    return !!data?.success;
   } catch (err) {
     console.error('deleteTelegramMessages failed:', err);
     return false;
@@ -545,14 +749,17 @@ export async function verifyTelegramMessages(
   messageIds: number[]
 ): Promise<{ deletedIds: number[]; existingIds: number[] }> {
   if (!messageIds || messageIds.length === 0) return { deletedIds: [], existingIds: [] };
+  if (!getBackendApiUrl()) {
+    return verifyTelegramMessagesDirect(sessionString, chatId, messageIds);
+  }
+
   try {
-    const res = await fetch('/api/telegram/verify-messages', {
+    const data = await safeFetchJson<any>('/api/telegram/verify-messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session: sessionString, chatId, messageIds }),
     });
-    const data = await res.json();
-    if (data.success) {
+    if (data?.success) {
       return {
         deletedIds: data.deletedIds || [],
         existingIds: data.existingIds || [],
@@ -561,7 +768,7 @@ export async function verifyTelegramMessages(
   } catch (err) {
     console.error('verifyTelegramMessages failed:', err);
   }
-  return { deletedIds: [], existingIds: [] };
+  return { deletedIds: [], existingIds: messageIds };
 }
 
 // Rename Telegram message caption
@@ -571,14 +778,17 @@ export async function renameTelegramMessage(
   messageId: number,
   newName: string
 ): Promise<boolean> {
+  if (!getBackendApiUrl()) {
+    return renameTelegramMessageDirect(sessionString, chatId, messageId, newName);
+  }
+
   try {
-    const res = await fetch('/api/telegram/rename', {
+    const data = await safeFetchJson<any>('/api/telegram/rename', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionString, chatId, messageId, newName }),
     });
-    const data = await res.json();
-    return !!data.success;
+    return !!data?.success;
   } catch (err) {
     console.error('renameTelegramMessage failed:', err);
     return false;
@@ -592,17 +802,63 @@ export async function forwardTelegramMessage(
   toChatId: string,
   messageId: number
 ): Promise<boolean> {
+  if (!getBackendApiUrl()) {
+    return forwardTelegramMessageDirect(sessionString, fromChatId, toChatId, messageId);
+  }
+
   try {
-    const res = await fetch('/api/telegram/forward', {
+    const data = await safeFetchJson<any>('/api/telegram/forward', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionString, fromChatId, toChatId, messageId }),
     });
-    const data = await res.json();
-    return !!data.success;
+    return !!data?.success;
   } catch (err) {
     console.error('forwardTelegramMessage failed:', err);
     return false;
   }
 }
 
+// Sync folder metadata to Telegram
+export async function syncMetadataToTelegram(
+  sessionString: string,
+  folders: DriveFolder[]
+): Promise<boolean> {
+  if (!getBackendApiUrl()) {
+    return syncMetadataToTelegramDirect(sessionString, folders);
+  }
+
+  try {
+    const data = await safeFetchJson<any>('/api/telegram/sync-metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: sessionString, folders }),
+    });
+    return !!data?.success;
+  } catch (err) {
+    console.error('syncMetadataToTelegram failed:', err);
+    return false;
+  }
+}
+
+// Fetch folder metadata from Telegram
+export async function fetchMetadataFromTelegram(
+  sessionString: string
+): Promise<{ folders: DriveFolder[] }> {
+  if (!getBackendApiUrl()) {
+    return fetchMetadataFromTelegramDirect(sessionString);
+  }
+
+  try {
+    const data = await safeFetchJson<any>(
+      `/api/telegram/sync-metadata?session=${encodeURIComponent(sessionString)}`
+    );
+    if (data && data.success) {
+      return { folders: data.folders || [] };
+    }
+    return { folders: [] };
+  } catch (err) {
+    console.error('fetchMetadataFromTelegram failed:', err);
+    return { folders: [] };
+  }
+}

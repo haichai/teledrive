@@ -300,6 +300,17 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // CORS middleware for cross-origin frontend support (e.g., Vercel frontend -> Render backend)
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // Configure Multer for file uploads in memory
@@ -309,8 +320,17 @@ async function startServer() {
   });
 
   // Health check
-  app.get('/api/health', (req, res) => {
+  app.get(['/api/health', '/healthz'], (req, res) => {
     res.json({ status: 'ok', time: new Date().toISOString() });
+  });
+
+  // Config endpoint for client-side direct connections
+  app.get('/api/telegram/config', (req, res) => {
+    res.json({
+      success: true,
+      apiId: DEFAULT_API_ID,
+      apiHash: DEFAULT_API_HASH,
+    });
   });
 
   // ==========================================
@@ -795,6 +815,70 @@ async function startServer() {
   });
 
   // ==========================================
+  // 7b. Sync Metadata (Folders, settings) to Telegram Saved Messages
+  // ==========================================
+  app.post('/api/telegram/sync-metadata', async (req, res) => {
+    const { session, folders } = req.body;
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'Session string is required' });
+    }
+    if (!Array.isArray(folders)) {
+      return res.status(400).json({ success: false, error: 'Folders must be an array' });
+    }
+
+    try {
+      const client = await getTelegramClient(session);
+      const metadataPayload = {
+        folders,
+        updatedAt: Date.now(),
+      };
+      const textMessage = `[TeleCloud-Folder-Sync-v1]\n${JSON.stringify(metadataPayload)}`;
+      
+      // Send the text message to Saved Messages ('me')
+      await client.sendMessage('me', { message: textMessage });
+      
+      res.json({ success: true, message: 'Metadata synced successfully to Saved Messages' });
+    } catch (err: any) {
+      console.error('[MTProto] Sync metadata failed:', err?.message || err);
+      res.status(500).json({ success: false, error: err?.message || 'Failed to sync metadata to Telegram' });
+    }
+  });
+
+  app.get('/api/telegram/sync-metadata', async (req, res) => {
+    const sessionString = req.query.session as string;
+    if (!sessionString) {
+      return res.status(400).json({ success: false, error: 'Session string is required' });
+    }
+
+    try {
+      const client = await getTelegramClient(sessionString);
+      let foundMetadata: any = null;
+
+      // Look at the last 50 messages in Saved Messages to find the latest folder sync message
+      for await (const msg of client.iterMessages('me', { limit: 50 })) {
+        if (msg.message && msg.message.startsWith('[TeleCloud-Folder-Sync-v1]')) {
+          try {
+            const jsonPart = msg.message.substring('[TeleCloud-Folder-Sync-v1]\n'.length);
+            foundMetadata = JSON.parse(jsonPart);
+            break; // Found the latest one
+          } catch (e) {
+            console.error('[MTProto] Failed to parse folder sync JSON from message:', e);
+          }
+        }
+      }
+
+      if (foundMetadata) {
+        res.json({ success: true, folders: foundMetadata.folders || [] });
+      } else {
+        res.json({ success: true, folders: [], message: 'No sync message found' });
+      }
+    } catch (err: any) {
+      console.error('[MTProto] Fetch metadata failed:', err?.message || err);
+      res.status(500).json({ success: false, error: err?.message || 'Failed to fetch metadata from Telegram' });
+    }
+  });
+
+  // ==========================================
   // 8. Fetch/Sync Files from Telegram Cloud
   // ==========================================
   app.get('/api/telegram/files', async (req, res) => {
@@ -822,17 +906,65 @@ async function startServer() {
         }
       } catch {}
 
-      // Iterate through message history to capture files with 18s time guard to prevent gateway 504 timeouts
+      // Iterate through message history to capture files and links with 18s time guard to prevent gateway 504 timeouts
       const files: any[] = [];
+      const links: any[] = [];
       const scanStartTime = Date.now();
 
       try {
         for await (const msg of client.iterMessages(target, { limit })) {
           if (Date.now() - scanStartTime > 18000) {
-            console.log(`[MTProto] Message scan completed safely under 18s guard: ${files.length} files found`);
+            console.log(`[MTProto] Message scan completed safely under 18s guard: ${files.length} files found, ${links.length} links found`);
             break;
           }
-          if (!msg || !msg.media) continue;
+          if (!msg) continue;
+
+          // Ignore folder/metadata synchronization messages
+          if (msg.message && msg.message.startsWith('[TeleCloud-Folder-Sync-v1]')) {
+            continue;
+          }
+
+          // 1. Extract plain-text links/hyperlinks from message body or caption
+          if (msg.message && msg.message.trim().length > 0) {
+            const urlRegex = /https?:\/\/[^\s"'<>\(\)]+/gi;
+            const matches = msg.message.match(urlRegex);
+            if (matches) {
+              // Extract webpage preview if available
+              let previewInfo: any = {};
+              if (msg.media && msg.media.className === 'MessageMediaWebPage' && (msg.media as any).webpage) {
+                const wp = (msg.media as any).webpage;
+                if (wp.className !== 'WebPageEmpty' && wp.className !== 'WebPagePending') {
+                  previewInfo.title = wp.title || undefined;
+                  previewInfo.description = wp.description || undefined;
+                  previewInfo.siteName = wp.siteName || undefined;
+                  if (wp.photo) {
+                    previewInfo.previewUrl = `/api/telegram/download?session=${encodeURIComponent(sessionString)}&chatId=${encodeURIComponent(chatId)}&messageId=${msg.id}&preview=1&inline=1`;
+                  }
+                }
+              } else if (msg.media && msg.media.className === 'MessageMediaPhoto') {
+                // If there's a standalone photo attached to the link message, we can use it as preview
+                previewInfo.previewUrl = `/api/telegram/download?session=${encodeURIComponent(sessionString)}&chatId=${encodeURIComponent(chatId)}&messageId=${msg.id}&preview=1&inline=1`;
+              }
+
+              for (const url of matches) {
+                // Avoid duplicating exactly the same link in the list if from the same message
+                if (!links.some(l => l.url === url && l.telegramMessageId === msg.id)) {
+                  links.push({
+                    id: `link-${chatId}-${msg.id}-${Buffer.from(url.slice(0, Math.min(15, url.length))).toString('hex')}`,
+                    url: url,
+                    messageText: msg.message,
+                    telegramMessageId: msg.id,
+                    telegramChatId: chatId,
+                    createdAt: (msg.date || Date.now() / 1000) * 1000,
+                    ...previewInfo,
+                  });
+                }
+              }
+            }
+          }
+
+          // 2. If message has media, extract it as a file
+          if (!msg.media) continue;
 
           let fileName = '';
           let fileSize = 0;
@@ -917,7 +1049,9 @@ async function startServer() {
       res.json({
         success: true,
         files,
+        links,
         totalFiles: files.length,
+        totalLinks: links.length,
       });
     } catch (err: any) {
       console.error('[MTProto] GetFiles failed:', err?.message || err);
@@ -928,12 +1062,35 @@ async function startServer() {
   // ==========================================
   // 9. Download / Stream Media from Telegram MTProto
   // ==========================================
+  class ConcurrencyQueue {
+    private active = 0;
+    private limit = 3; // Limit parallel MTProto downloads to 3 for stability and speed
+    private waiting: (() => void)[] = [];
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+      if (this.active >= this.limit) {
+        await new Promise<void>((resolve) => this.waiting.push(resolve));
+      }
+      this.active++;
+      try {
+        return await task();
+      } finally {
+        this.active--;
+        const next = this.waiting.shift();
+        if (next) next();
+      }
+    }
+  }
+
+  const downloadQueue = new ConcurrencyQueue();
+
   app.get('/api/telegram/download', async (req, res) => {
     const sessionString = req.query.session as string;
     const chatId = (req.query.chatId as string) || 'me';
     const messageId = parseInt(req.query.messageId as string);
     const filename = (req.query.filename as string) || `telegram_file_${messageId}`;
     const preview = req.query.preview === '1';
+    const inline = req.query.inline === '1';
 
     if (!sessionString || !messageId) {
       return res.status(400).json({ success: false, error: 'session and messageId are required' });
@@ -970,7 +1127,8 @@ async function startServer() {
         if (preview) {
           // If preview, use thumbnail if available to prevent downloading huge files
           if (doc.thumbs && doc.thumbs.length > 0) {
-            downloadOptions.thumb = doc.thumbs.length - 1;
+            // Find the smallest/medium thumbnail (usually the first one in doc.thumbs, e.g. type 's' or 'm') to maximize loading speed
+            downloadOptions.thumb = doc.thumbs[0];
             mimeType = 'image/jpeg';
           } else {
             // For large documents/videos without thumbnails, do not attempt to download full file for a preview
@@ -980,26 +1138,49 @@ async function startServer() {
             }
           }
         }
-      } else if (msg.media.className === 'MessageMediaPhoto') {
+      } else if (msg.media.className === 'MessageMediaPhoto' && (msg.media as any).photo) {
         mimeType = 'image/jpeg';
         if (preview) {
-          downloadOptions.thumb = 1; // standard medium thumb for photos
+          const photo = (msg.media as any).photo;
+          if (photo.sizes && photo.sizes.length > 0) {
+            const sizes = photo.sizes;
+            // Prefer 's' (small, ~5-10KB) or 'm' (medium, ~15-25KB) for incredibly fast listing/grid loading
+            const thumbObj = sizes.find((s: any) => s.type === 's') || sizes.find((s: any) => s.type === 'm') || sizes[0];
+            downloadOptions.thumb = thumbObj;
+          }
         }
+      } else if (msg.media.className === 'MessageMediaPhoto') {
+        mimeType = 'image/jpeg';
+      } else if (msg.media.className === 'MessageMediaWebPage') {
+        mimeType = 'image/jpeg';
       }
 
       // Download buffer with timeout guard and single retry
       let buffer: Buffer | undefined;
       try {
-        buffer = await Promise.race([
-          client.downloadMedia(msg, downloadOptions) as Promise<Buffer>,
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Download timeout (upload.GetFile)')), preview ? 15000 : 60000)
-          )
-        ]);
+        buffer = await downloadQueue.run(async () => {
+          return await Promise.race([
+            client.downloadMedia(msg, downloadOptions) as Promise<Buffer>,
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Download timeout (upload.GetFile)')), preview ? 30000 : 60000)
+            )
+          ]);
+        });
       } catch (dlErr: any) {
-        console.warn(`[MTProto] Initial download attempt failed (${dlErr?.message}), retrying once...`);
-        // Retry once
-        buffer = await (client.downloadMedia(msg, downloadOptions) as Promise<Buffer>);
+        console.warn(`[MTProto] Initial download with thumb/options failed (${dlErr?.message || dlErr}), retrying with full media fallback...`);
+        // Retry once WITHOUT downloadOptions (full media fallback)
+        try {
+          buffer = await downloadQueue.run(async () => {
+            return await Promise.race([
+              client.downloadMedia(msg, {}) as Promise<Buffer>,
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Fallback download timeout')), 30000)
+              )
+            ]);
+          });
+        } catch (retryErr: any) {
+          console.error('[MTProto] Full media download fallback also failed:', retryErr?.message || retryErr);
+        }
       }
 
       if (!buffer || buffer.length === 0) {
@@ -1014,12 +1195,12 @@ async function startServer() {
       const safeFilename = filename.replace(/["\r\n]/g, '_');
       res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Length', buffer.length);
-      if (preview) {
+      if (preview || inline) {
         res.setHeader('Cache-Control', 'public, max-age=86400');
       }
       res.setHeader(
         'Content-Disposition',
-        `${preview ? 'inline' : 'attachment'}; filename="${encodeURIComponent(safeFilename)}"`
+        `${(preview || inline) ? 'inline' : 'attachment'}; filename="${encodeURIComponent(safeFilename)}"`
       );
 
       res.end(buffer);

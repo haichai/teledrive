@@ -1,5 +1,5 @@
 /**
- * Client-Side Encryption Layer for TeleDrive
+ * Client-Side Encryption Layer for TeleCloud
  * Uses standard Web Crypto API (SubtleCrypto) with AES-GCM (256-bit).
  * Encrypts files in the browser before sending to Telegram MTProto.
  */
@@ -30,7 +30,7 @@ export async function deriveKeyFromPassword(password: string, salt: Uint8Array):
 
 export async function encryptFileBuffer(
   buffer: ArrayBuffer,
-  passphrase = 'TeleDrive-Client-MasterKey-2026'
+  passphrase = 'TeleCloud-Client-MasterKey-2026'
 ): Promise<{ encryptedBlob: Blob; ivHex: string }> {
   const salt = window.crypto.getRandomValues(new Uint8Array(16));
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
@@ -60,7 +60,7 @@ export async function encryptFileBuffer(
 
 export async function decryptFileBuffer(
   buffer: ArrayBuffer,
-  passphrase = 'TeleDrive-Client-MasterKey-2026'
+  passphrase = 'TeleCloud-Client-MasterKey-2026'
 ): Promise<ArrayBuffer> {
   const salt = new Uint8Array(buffer.slice(0, 16));
   const iv = new Uint8Array(buffer.slice(16, 28));
